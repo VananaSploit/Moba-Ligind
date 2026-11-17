@@ -39,6 +39,11 @@ G.Level = f1(ReplicatedStorage.Config.LevelConfig)
 G.Areas = f1(ReplicatedStorage.Config.AreasConfig)
 G.Fmt = f1(ReplicatedStorage.Shared.NumberFormat)
 G.HUD = f1(controllers:WaitForChild("HUDController"))
+G.Dreamland = f1(ReplicatedStorage.Shared.Dreamland)
+G.AnimalsData = f1(ReplicatedStorage.AnimalsData)
+G.DreamlandConfig = f1(ReplicatedStorage.Config.DreamlandConfig)
+G.GameConfig = f1(ReplicatedStorage.Config.GameConfig)
+G.AnimalRoll = f1(ReplicatedStorage.Shared.AnimalRoll)
 
 local function get(key)
   return G.Data and G.Data:Get(key)
@@ -61,6 +66,14 @@ local S = {
   tap = true,
   alive = true,
   fastEquip = true,
+  dream = false,
+  dreamZone = "Best reachable",
+  autoIndex = false,
+  indexTarget = "Auto (Missing)",
+  indexTargetFood = nil,
+  autoDreamIndex = false,
+  dreamIndexTarget = "Auto (Missing)",
+  dreamIndexTargetFood = nil,
 }
 
 local connections = {}
@@ -70,7 +83,7 @@ if G.Meter and G.Meter.new then
   G._origMeterNew = orig
   G.Meter.new = function(...)
     local obj = orig(...)
-    if (S.throw or S.farm) and obj then
+    if (S.throw or S.farm or S.dream) and obj then
       pcall(function() obj:SetLocked(true) end)
     end
     return obj
@@ -642,6 +655,7 @@ local FarmGroup = FarmTab:AddLeftGroupbox("Auto Farm", "repeat")
 local ThrowGroup = FarmTab:AddRightGroupbox("Throw", "target")
 local TrainGroup = FarmTab:AddLeftGroupbox("Train", "dumbbell")
 local AnimalGroup = FarmTab:AddRightGroupbox("Animals", "paw-print")
+local IndexGroup = FarmTab:AddLeftGroupbox("Index Farm", "book")
 
 local function buildZoneOptions()
   local lvl = tonumber(get("Level")) or 1
@@ -660,10 +674,20 @@ end
 
 local function throwPowerForLevel(level)
   local base = G.Level.ThrowPowerForLevel(level)
+  
+  if S.indexTargetDistance and S.indexTargetDistance > 0 then
+    local meterBonus = 20
+    if G.GameConfig and G.GameConfig.Throw and G.GameConfig.Throw.MeterBonusStuds then
+      meterBonus = G.GameConfig.Throw.MeterBonusStuds
+    end
+    local targetPower = math.max(1, S.indexTargetDistance - meterBonus)
+    return math.min(base, targetPower)
+  end
+  
   if S.zone and S.zone ~= "Max power" then
     for _, zone in ipairs(G.Areas.List) do
-      if zone.Name == S.zone and zone.StartDistance and zone.Length then
-        return math.min(base, zone.StartDistance + zone.Length * 0.95)
+      if zone.Name == S.zone and zone.StartDistance then
+        return math.min(base, zone.StartDistance + 1)
       end
     end
   end
@@ -678,6 +702,357 @@ local function zoneFor(power)
   return name
 end
 
+local RARITY_TIER = {
+  Common = 1, Uncommon = 2, Rare = 3, Epic = 5, Legendary = 6, Mythic = 8,
+  Secret = 9, Divine = 11, Celestial = 13, Eternal = 14, Cosmic = 16, Supreme = 17, Sovereign = 19
+}
+
+local HIGH_TIER_RARITIES = { Celestial = true, Eternal = true, Cosmic = true, Supreme = true, Sovereign = true }
+
+local function equipBestFoodForRarity(rarity, targetFoodIndex)
+  local targetTier = RARITY_TIER[rarity] or 1
+  local owned = get("OwnedFoods") or {}
+  local bestFoodIndex = nil
+  local bestFoodTier = -1
+  
+  if targetFoodIndex then
+    local has = owned[targetFoodIndex] == true or owned[tostring(targetFoodIndex)] == true
+    if has then
+      bestFoodIndex = targetFoodIndex
+    end
+  end
+  
+  if not bestFoodIndex then
+    for i = 1, G.Foods.Count() do
+      local food = G.Foods.Get(i)
+      local has = owned[i] == true or owned[tostring(i)] == true
+      if has and food then
+        if food.Tier == targetTier then
+          bestFoodTier = food.Tier
+          bestFoodIndex = i
+          break
+        end
+      end
+    end
+  end
+  
+  if not bestFoodIndex then
+    for i = 1, G.Foods.Count() do
+      local food = G.Foods.Get(i)
+      local has = owned[i] == true or owned[tostring(i)] == true
+      if has and food and food.Tier > bestFoodTier then
+        bestFoodTier = food.Tier
+        bestFoodIndex = i
+      end
+    end
+  end
+  
+  if bestFoodIndex and get("EquippedFood") ~= bestFoodIndex then
+    invoke("Shop_Equip", bestFoodIndex)
+  end
+end
+
+local function getMissingIndexZone()
+  local caught = get("Index") or {}
+  local bestZone = nil
+  local bestTargetDist = 0
+  local bestRarity = "Common"
+  local lowestStart = math.huge
+  local lvl = tonumber(get("Level")) or 1
+  local power = G.Level.ThrowPowerForLevel(lvl)
+  
+  for _, zone in ipairs(G.Areas and G.Areas.List or {}) do
+    if power >= (zone.StartDistance or 0) then
+      local areaAnimals = G.AnimalsData and G.AnimalsData[zone.Key]
+      
+      if areaAnimals and #areaAnimals > 0 then
+        for i, animal in ipairs(areaAnimals) do
+          if not caught[animal.ModelName] then
+            if (zone.StartDistance or 0) < lowestStart then
+              lowestStart = zone.StartDistance or 0
+              bestZone = zone.Name
+              
+              local bestDiff = math.huge
+              local bestDepth = 0.5
+              local bestFoodIdx = 1
+              local owned = get("OwnedFoods") or {}
+              
+              local info = G.Economy.Get(animal.ModelName)
+              local targetRarity = info and info.Rarity or "Common"
+              local isHighTier = HIGH_TIER_RARITIES[targetRarity]
+              local isLastPet = (i == #areaAnimals)
+              local forceBestFruit = isHighTier or isLastPet
+              
+              local maxOwnedBait = -1
+              for f = 1, G.Foods.CountAll() do
+                local food = G.Foods.GetAny(f)
+                local has = owned[f] == true or owned[tostring(f)] == true
+                if has and food and food.Bait > maxOwnedBait then maxOwnedBait = food.Bait end
+              end
+              
+              if G.AnimalRoll and G.AnimalRoll.PoolCenter then
+                for f = 1, G.Foods.CountAll() do
+                  local food = G.Foods.GetAny(f)
+                  local has = owned[f] == true or owned[tostring(f)] == true
+                  if food and (has or f == 1) and (not forceBestFruit or food.Bait == maxOwnedBait) then
+                    for d = 0.05, 0.95, 0.05 do
+                      local center, ceiling = G.AnimalRoll.PoolCenter(food.Bait, zone.Index, d)
+                      if ceiling >= i then
+                        local diff = math.abs(center - i)
+                        if d > 0.25 and d < 0.40 then diff = diff + 0.5 end
+                        if d > 0.60 and d < 0.75 then diff = diff + 0.5 end
+                        if diff < bestDiff then
+                          bestDiff = diff
+                          bestDepth = d
+                          bestFoodIdx = f
+                        end
+                      end
+                    end
+                  end
+                end
+              else
+                local totalPets = #areaAnimals
+                local petsPerLine = math.ceil(totalPets / 3)
+                local lineIndex = math.ceil(i / petsPerLine) 
+                bestDepth = (lineIndex - 0.5) / 3
+              end
+              
+              local areaListIndex = nil
+              for idx, area in ipairs(G.Areas.List) do
+                if area.Key == zone.Key then areaListIndex = idx; break end
+              end
+
+              local areaGeo = f1(ReplicatedStorage.Shared.AreaUtil).Get(areaListIndex or zone.Index)
+              if areaGeo then
+                local launchZ = f1(ReplicatedStorage.Shared.AreaUtil).GetLaunchPosition().Z
+                local distStart = launchZ - areaGeo.ZStart
+                local length = areaGeo.ZStart - areaGeo.ZEnd
+                bestTargetDist = distStart + (length * bestDepth)
+              else
+                bestTargetDist = zone.StartDistance + (zone.Length * bestDepth)
+              end
+              
+              S.indexTargetFood = bestFoodIdx
+              
+              local info = G.Economy.Get(animal.ModelName)
+              bestRarity = info and info.Rarity or "Common"
+            end
+            break
+          end
+        end
+      end
+    end
+  end
+  return bestZone, bestTargetDist, bestRarity
+end
+
+local function buildDreamIndexZoneOptions()
+  local data = get("Dreamland") or {}
+  local caught = data.Caught or {}
+  local list = { "Auto (Missing)" }
+  local lvl = tonumber(get("Level")) or 1
+  local power = G.Level.ThrowPowerForLevel(lvl)
+  local allComplete = true
+  local hasReachable = false
+
+  for _, zone in ipairs(G.DreamlandConfig.Zones) do
+    local baseArea = G.Areas.ByKey[zone.Area]
+    if baseArea then
+      if power >= (baseArea.StartDistance or 0) then
+        hasReachable = true
+        local hasAll = true
+        for _, animal in ipairs(zone.Animals) do
+          if not caught[animal] then
+            hasAll = false
+            allComplete = false
+            break
+          end
+        end
+        if hasAll then
+          table.insert(list, baseArea.Name .. " ✅")
+        else
+          table.insert(list, baseArea.Name)
+        end
+      else
+        table.insert(list, ("🔒 %s (Lv %d)"):format(baseArea.Name, G.Level.LevelForDistance(baseArea.StartDistance)))
+      end
+    end
+  end
+
+  if hasReachable and allComplete then
+    list[1] = "Auto (Complete) ✅"
+  end
+
+  return list
+end
+
+local function getMissingDreamIndexZone()
+  local data = get("Dreamland") or {}
+  local caught = data.Caught or {}
+  local bestZone = nil
+  local bestTargetDist = 0
+  local bestRarity = "Common"
+  local bestFoodIdx = 1
+  local lvl = tonumber(get("Level")) or 1
+  local power = G.Level.ThrowPowerForLevel(lvl)
+  
+  local targetKey = S.dreamIndexTarget:gsub(" ✅", "")
+
+  for _, zone in ipairs(G.DreamlandConfig.Zones) do
+    local baseArea = G.Areas.ByKey[zone.Area]
+    if baseArea and (targetKey == "Auto (Missing)" or baseArea.Name == targetKey) then
+      if power >= (baseArea.StartDistance or 0) then
+        local areaAnimals = zone.Animals
+        for i, animalName in ipairs(areaAnimals) do
+          if not caught[animalName] then
+            bestZone = baseArea.Name
+            local bestDiff = math.huge
+            local bestDepth = 0.5
+            local owned = get("OwnedFoods") or {}
+
+            local info = G.Economy.Get(animalName)
+            local targetRarity = info and info.Rarity or "Common"
+            local isHighTier = HIGH_TIER_RARITIES[targetRarity]
+            local isLastPet = (i == #areaAnimals)
+            local forceBestFruit = isHighTier or isLastPet
+            
+            local maxOwnedBait = -1
+            for f = 1, G.Foods.CountAll() do
+              local food = G.Foods.GetAny(f)
+              local has = owned[f] == true or owned[tostring(f)] == true
+              if has and food and food.Bait > maxOwnedBait then maxOwnedBait = food.Bait end
+            end
+
+            if G.AnimalRoll and G.AnimalRoll.PoolCenter then
+              for f = 1, G.Foods.CountAll() do
+                local food = G.Foods.GetAny(f)
+                local has = owned[f] == true or owned[tostring(f)] == true
+                if food and (has or f == 1) and (not forceBestFruit or food.Bait == maxOwnedBait) then
+                  for d = 0.05, 0.95, 0.05 do
+                    local center, ceiling = G.AnimalRoll.PoolCenter(food.Bait, baseArea.Index, d)
+                    if ceiling >= i then
+                      local diff = math.abs(center - i)
+                      if d > 0.25 and d < 0.40 then diff = diff + 0.5 end
+                      if d > 0.60 and d < 0.75 then diff = diff + 0.5 end
+                      if diff < bestDiff then
+                        bestDiff = diff
+                        bestDepth = d
+                        bestFoodIdx = f
+                      end
+                    end
+                  end
+                end
+              end
+            else
+              local petsPerLine = math.ceil(#areaAnimals / 3)
+              local lineIndex = math.ceil(i / petsPerLine)
+              bestDepth = (lineIndex - 0.5) / 3
+            end
+
+            local areaListIndex = nil
+            for idx, area in ipairs(G.Areas.List) do
+              if area.Key == baseArea.Key then areaListIndex = idx; break end
+            end
+
+            local areaGeo = f1(ReplicatedStorage.Shared.AreaUtil).Get(areaListIndex or baseArea.Index)
+            if areaGeo then
+              local launchZ = f1(ReplicatedStorage.Shared.AreaUtil).GetLaunchPosition().Z
+              local distStart = launchZ - areaGeo.ZStart
+              local length = areaGeo.ZStart - areaGeo.ZEnd
+              bestTargetDist = distStart + (length * bestDepth)
+            else
+              bestTargetDist = baseArea.StartDistance + (baseArea.Length * bestDepth)
+            end
+            
+            S.dreamIndexTargetFood = bestFoodIdx
+            local info = G.Economy.Get(animalName)
+            bestRarity = info and info.Rarity or "Common"
+            
+            return bestZone, bestTargetDist, bestRarity
+          end
+        end
+        if targetKey ~= "Auto (Missing)" then return nil end
+      end
+    end
+  end
+  return nil
+end
+
+local function buildIndexZoneOptions()
+  local caught = get("Index") or {}
+  local list = { "Auto (Missing)" }
+  local lvl = tonumber(get("Level")) or 1
+  local power = G.Level.ThrowPowerForLevel(lvl)
+  local allReachableComplete = true
+  local hasReachable = false
+
+  for _, zone in ipairs(G.Areas and G.Areas.List or {}) do
+    if power >= (zone.StartDistance or 0) then
+      hasReachable = true
+      local hasAll = true
+      local areaAnimals = G.AnimalsData and G.AnimalsData[zone.Key]
+      
+      if areaAnimals and #areaAnimals > 0 then
+        for _, animal in ipairs(areaAnimals) do
+          if not caught[animal.ModelName] then
+            hasAll = false
+            allReachableComplete = false
+            break
+          end
+        end
+      end
+      
+      if hasAll then
+        table.insert(list, zone.Name .. " ✅")
+      else
+        table.insert(list, zone.Name)
+      end
+    else
+      table.insert(list, ("🔒 %s (Lv %d)"):format(zone.Name, G.Level.LevelForDistance(zone.StartDistance)))
+    end
+  end
+
+  if hasReachable and allReachableComplete then
+    list[1] = "Auto (Complete) ✅"
+  end
+
+  return list
+end
+
+local startIndexOpts = buildIndexZoneOptions()
+S.indexTarget = startIndexOpts[1]
+
+local indexStatusLabel = IndexGroup:AddLabel("Index: OFF")
+
+IndexGroup:AddToggle("AutoIndex", {
+  Text = "Auto Index Farm",
+  Default = false,
+  Tooltip = "Forces Auto Throw to run, targeting areas where you are missing animals.",
+  Callback = function(state)
+    S.autoIndex = state
+    if state then
+      Library.Toggles.AutoThrow:SetValue(true)
+    end
+  end,
+})
+
+IndexGroup:AddDropdown("IndexTarget", {
+  Text = "Target Area",
+  Values = startIndexOpts,
+  Default = startIndexOpts[1],
+  Callback = function(v)
+    if type(v) == "string" and v:find("🔒", 1, true) then
+      task.defer(function()
+        pcall(function()
+          Library.Options.IndexTarget:SetValue(S.indexTarget or startIndexOpts[1])
+        end)
+      end)
+      return
+    end
+    S.indexTarget = v
+  end,
+})
+
 local farmStatusLabel = FarmGroup:AddLabel("Auto Farm: OFF")
 local function setFarmStatus(text) setName(FarmGroup:GetControl(farmStatusLabel), text) end
 
@@ -687,7 +1062,7 @@ FarmGroup:AddToggle("AutoFarm", {
   Callback = function(state)
     S.farm = state
     if G.Meter then
-      G.Meter.TestAutoTap = (S.throw or S.farm) and 0.5 or nil
+      G.Meter.TestAutoTap = (S.throw or S.farm or S.dream) and 0.5 or nil
     end
     if not state and G.Train and G.Train.IsRunning() then
       pcall(G.Train.Stop)
@@ -704,9 +1079,11 @@ FarmGroup:AddToggle("FarmLvStop", {
   Callback = function(state) S.farmLvStop = state end,
 })
 
+local startFarmOpts = buildZoneOptions()
+
 FarmGroup:AddDropdown("FarmZone", {
   Text = "Target zone",
-  Values = buildZoneOptions(),
+  Values = startFarmOpts,
   Default = "Max power",
   Callback = function(value)
     if type(value) == "string" and value:find("🔒", 1, true) then
@@ -729,11 +1106,63 @@ task.spawn(function()
       if lvl ~= last then
         last = lvl
         local opts = buildZoneOptions()
-        Library.Options.FarmZone:SetValues(opts)
-        if S.zone and not table.find(opts, S.zone) then
+        if not table.find(opts, S.zone) then
           S.zone = "Max power"
-          Library.Options.FarmZone:SetValue("Max power")
         end
+        if Library.Options.FarmZone then
+          Library.Options.FarmZone:SetValues(opts)
+          Library.Options.FarmZone:SetValue(S.zone)
+        end
+      end
+      
+      local iOpts = buildIndexZoneOptions()
+      local currentIdx = tostring(S.indexTarget)
+      
+      if not table.find(iOpts, currentIdx) then
+        local baseZone = currentIdx:gsub(" ✅", "")
+        local newIdx = nil
+        
+        for _, opt in ipairs(iOpts) do
+          if opt:gsub(" ✅", "") == baseZone then
+            newIdx = opt
+            break
+          end
+        end
+        
+        if not newIdx then
+          newIdx = iOpts[1]
+        end
+        S.indexTarget = newIdx
+      end
+      
+      if Library.Options.IndexTarget then
+        Library.Options.IndexTarget:SetValues(iOpts)
+        Library.Options.IndexTarget:SetValue(S.indexTarget)
+      end
+
+      local dIdxOpts = buildDreamIndexZoneOptions()
+      local currentDreamIdx = tostring(S.dreamIndexTarget)
+      
+      if not table.find(dIdxOpts, currentDreamIdx) then
+        local baseZone = currentDreamIdx:gsub(" ✅", "")
+        local newDreamIdx = nil
+        
+        for _, opt in ipairs(dIdxOpts) do
+          if opt:gsub(" ✅", "") == baseZone then
+            newDreamIdx = opt
+            break
+          end
+        end
+        
+        if not newDreamIdx then
+          newDreamIdx = dIdxOpts[1]
+        end
+        S.dreamIndexTarget = newDreamIdx
+      end
+      
+      if Library.Options.DreamIndexTarget then
+        Library.Options.DreamIndexTarget:SetValues(dIdxOpts)
+        Library.Options.DreamIndexTarget:SetValue(S.dreamIndexTarget)
       end
     end)
     task.wait(5)
@@ -753,13 +1182,22 @@ FarmGroup:AddSlider("FarmTrainMax", {
 })
 
 local function teleportToTraining()
-  local area = workspace:FindFirstChild("TrainingArea", true)
-  local part = area and (area.PrimaryPart or area:FindFirstChildWhichIsA("BasePart"))
+  local plotIdx = LP:GetAttribute("PlotIndex")
+  local plots = workspace:FindFirstChild("Plots")
+  local plot = plots and plotIdx and plots:FindFirstChild(tostring(plotIdx))
+  local part
+  if plot then
+    part = plot:FindFirstChild("TrainingArea", true) or plot:FindFirstChild("UpgradeButton", true) or plot:FindFirstChildWhichIsA("BasePart")
+  end
+  if not part then
+    local area = workspace:FindFirstChild("TrainingArea", true)
+    part = area and (area.PrimaryPart or area:FindFirstChildWhichIsA("BasePart"))
+  end
   local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
   if not (part and root) then return false end
-  if (root.Position - part.Position).Magnitude > 4 then
+  if (root.Position - part.Position).Magnitude > 10 then
     root.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0))
-    task.wait(0.5)
+    task.wait(0.3)
   end
   return true
 end
@@ -788,7 +1226,7 @@ local function doThrow()
     end
   end
 
-  local t = os.clock() + 5
+  local t = os.clock() + 0.5
   while G.State.Busy and os.clock() < t do
     task.wait(0.05)
   end
@@ -864,20 +1302,20 @@ local function doThrow()
 
   local ok = pcall(function() G.Throw.Start() end)
   if not ok then
-    task.wait(3)
+    task.wait(0.5)
     return false
   end
 
   if finishedCount > beforeFinished then
-    task.wait(2)
+    task.wait(0.1)
     return true
   end
   if meterRuns > beforeMeter then
-    task.wait(2)
+    task.wait(0.1)
     return true
   end
 
-  task.wait(1)
+  task.wait(0.2)
   local after = snapshotState()
   if after.throws > before.throws then return true end
   if after.animals > before.animals then return true end
@@ -885,7 +1323,7 @@ local function doThrow()
   if after.level > before.level then return true end
   if after.superThrows < before.superThrows then return true end
 
-  task.wait(2)
+  task.wait(0.3)
   return false
 end
 
@@ -968,7 +1406,7 @@ ThrowGroup:AddToggle("AutoThrow", {
   Callback = function(state)
     S.throw = state
     if G.Meter then
-      G.Meter.TestAutoTap = (S.throw or S.farm) and 0.5 or nil
+      G.Meter.TestAutoTap = (S.throw or S.farm or S.dream) and 0.5 or nil
     end
   end,
 })
@@ -987,23 +1425,59 @@ ThrowGroup:AddDropdown("ThrowMode", {
 })
 
 local lastAutoThrowLevel = -1
-loop(nil, 1, function()
+local lastAutoThrowZone = ""
+local lastAutoThrowDist = -1
+loop(nil, 0.1, function()
   if not S.throw or S.farm then
     lastAutoThrowLevel = -1
+    lastAutoThrowZone = ""
+    lastAutoThrowDist = -1
     return
   end
+  
+  local dreamActive = S.dream and G.Dreamland and G.Dreamland.State() and G.Dreamland.State().Active
+  if dreamActive then
+    S.indexTargetDistance = nil
+    setName(IndexGroup:GetControl(indexStatusLabel), "Paused (Dream Event active)")
+  elseif S.autoIndex then
+    local target, targetDist, targetRarity = getMissingIndexZone()
+    if target then
+      S.zone = target
+      S.indexTargetDistance = targetDist
+      equipBestFoodForRarity(targetRarity, S.indexTargetFood)
+      local meterBonus = 20
+      if G.GameConfig and G.GameConfig.Throw and G.GameConfig.Throw.MeterBonusStuds then
+        meterBonus = G.GameConfig.Throw.MeterBonusStuds
+      end
+      local actualPower = math.max(1, targetDist - meterBonus)
+      setName(IndexGroup:GetControl(indexStatusLabel), ("Farming: %s (%.1f) [%s] Perfect"):format(target, actualPower, targetRarity))
+    else
+      S.autoIndex = false
+      S.indexTargetDistance = nil
+      Library.Toggles.AutoIndex:SetValue(false)
+      setName(IndexGroup:GetControl(indexStatusLabel), "Index Complete ✅")
+    end
+  else
+    S.indexTargetDistance = nil
+    S.indexTargetFood = nil
+    setName(IndexGroup:GetControl(indexStatusLabel), "Index: OFF")
+  end
+
   local curLvl = tonumber(get("Level")) or 1
-  if curLvl ~= lastAutoThrowLevel then
+  local curDist = S.indexTargetDistance or 0
+  if curLvl ~= lastAutoThrowLevel or S.zone ~= lastAutoThrowZone or curDist ~= lastAutoThrowDist then
     lastAutoThrowLevel = curLvl
+    lastAutoThrowZone = S.zone
+    lastAutoThrowDist = curDist
     invoke("Player_SetThrowPower", throwPowerForLevel(curLvl))
   end
   if doThrow() then
     throwCount += 1
     setThrowStatus("OK")
-    task.wait(1.5)
+    task.wait(0.1)
   else
     setThrowStatus("Failed - retrying")
-    task.wait(2)
+    task.wait(0.2)
   end
 end)
 
@@ -1032,6 +1506,14 @@ TrainGroup:AddToggle("AutoTapBonus", {
 
 loop(trainStatusLabel, 2, function()
   if S.farm then setTrainStatus("Auto Farm is on") return end
+  
+  local dreamActive = S.dream and G.Dreamland and G.Dreamland.State() and G.Dreamland.State().Active
+  if dreamActive then
+    if G.Train.IsRunning() then pcall(G.Train.Stop) end
+    setTrainStatus("Paused (Dream Event active)")
+    return
+  end
+  
   if not S.train or S.throw then setTrainStatus(S.throw and "Auto Throw is on" or "Auto Train: OFF") return end
   if G.Train.IsRunning() then setTrainStatus("Training...") return end
   if G.State and G.State.Busy then setTrainStatus("Busy: " .. tostring(G.State.Busy)) return end
@@ -1042,16 +1524,12 @@ end)
 local equipStatusLabel = AnimalGroup:AddLabel("Equip: idle")
 
 AnimalGroup:AddToggle("EquipBest", {
-  Text = "Auto Equip Best Animal",
+  Text = "Auto Equip Best",
   Default = true,
-  Callback = function(state) S.equipBest = state end,
-})
-
-AnimalGroup:AddToggle("FastEquip", {
-  Text = "Fast Equip (1s interval, 3x burst)",
-  Default = true,
-  Tooltip = "Fills all 10 slots in ~4s instead of ~200s. Turn off if kicked.",
-  Callback = function(state) S.fastEquip = state end,
+  Callback = function(state)
+    S.equipBest = state
+    S.fastEquip = state
+  end,
 })
 
 local function countPlaced()
@@ -1063,16 +1541,15 @@ local function countPlaced()
   return placed, total
 end
 
-loop(equipStatusLabel, function() return S.fastEquip and 1 or 20 end, function()
+loop(equipStatusLabel, function() return S.equipBest and 1 or 20 end, function()
   if not S.equipBest then return end
-  local bursts = S.fastEquip and 3 or 1
+  local bursts = 3
   for i = 1, bursts do
     invoke("Plot_EquipBest")
     if i < bursts then task.wait(0.08) end
   end
   local placed, total = countPlaced()
-  setName(AnimalGroup:GetControl(equipStatusLabel), ("Equip: %d/%d placed (%dx burst, %ss)"):format(
-    placed, total, bursts, S.fastEquip and "1" or "20"))
+  setName(AnimalGroup:GetControl(equipStatusLabel), ("Equip: %d/%d placed"):format(placed, total))
 end)
 
 local UpgradeGroup = UpgradeTab:AddLeftGroupbox("Auto Upgrade", "circle-arrow-up")
@@ -1106,9 +1583,20 @@ UpgradeGroup:AddToggle("AutoEquipFood", {
 loop(upgradeStatus, 3, function()
   local money = tonumber(get("Money")) or 0
   local log = {}
+  
+  local nextStand = S.stand and G.Stands.Get((get("Stand") or 0) + 1) or nil
+  local curFenceLvl = tonumber(get("FenceLevel") or get("Fence")) or 0
+  local nextFence = S.fence and G.Fence.Get(curFenceLvl + 1) or nil
+  
+  local needStand = nextStand and money >= nextStand.Price
+  local needFence = nextFence and money >= nextFence.Price
+
+  if (needStand or needFence) and not G.State.Busy and not (G.Train and G.Train.IsRunning()) then
+    teleportToTraining()
+    task.wait(0.3)
+  end
 
   if S.stand then
-    local nextStand = G.Stands.Get((get("Stand") or 0) + 1)
     if nextStand then
       if money >= nextStand.Price then
         local r = invoke("Stand_Upgrade")
@@ -1122,8 +1610,6 @@ loop(upgradeStatus, 3, function()
   end
 
   if S.fence then
-    local fenceLvl = tonumber(get("FenceLevel") or get("Fence")) or 0
-    local nextFence = G.Fence.Get(fenceLvl + 1)
     if nextFence then
       if money >= nextFence.Price then
         local r = invoke("Plot_UpgradeFence")
@@ -1150,7 +1636,7 @@ loop(upgradeStatus, 3, function()
       if has then bestOwned = i end
     end
     if bought > 0 then table.insert(log, "Bought " .. bought .. " food") end
-    if S.equipFood and bestOwned and get("EquippedFood") ~= bestOwned then
+    if S.equipFood and bestOwned and not S.autoIndex and get("EquippedFood") ~= bestOwned then
       invoke("Shop_Equip", bestOwned)
       table.insert(log, "Equipped food #" .. bestOwned)
     end
@@ -1163,6 +1649,21 @@ local SellGroup = UpgradeTab:AddRightGroupbox("Auto Sell", "coins")
 local sellStatus = SellGroup:AddLabel("Sold: 0 | -")
 local soldCount = 0
 local soldLast = "-"
+
+local RARITY_RANK = {
+  Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5, Mythic = 6,
+  Secret = 7, Divine = 8, Celestial = 9, Eternal = 10, Cosmic = 11, Supreme = 12, Sovereign = 13,
+}
+
+local function animalScore(info)
+  if not info then return 0 end
+  for _, field in ipairs({ "Income", "BaseIncome", "Price", "SellPrice", "Value", "SellValue" }) do
+    local n = tonumber(info[field])
+    if n then return n end
+  end
+  return RARITY_RANK[info.Rarity] or 0
+end
+
 local function setSellStatus()
   setName(SellGroup:GetControl(sellStatus), ("Sold: %d | %s"):format(soldCount, soldLast))
 end
@@ -1189,40 +1690,84 @@ SellGroup:AddDropdown("SellRar", {
 SellGroup:AddButton({
   Text = "Sell All",
   Callback = function()
-    local r = invoke("Plot_SellAll")
-    soldLast = r.Ok and "Sell All OK" or tostring(r.Reason)
+    soldLast = "Selling..."
     setSellStatus()
+    task.spawn(function()
+      local r = invoke("Plot_SellAll")
+      soldLast = r.Ok and "Sell All OK" or tostring(r.Reason)
+      setSellStatus()
+    end)
   end,
 })
 
-loop(sellStatus, 5, function()
+loop(sellStatus, 1, function()
   if not S.sell then return end
-  local soldThisPass = 0
+
+  local placed, unplaced = {}, {}
   for key, animal in pairs(get("Animals") or {}) do
-    if not S.sell then break end
-    if type(animal) == "table" and not animal.Placed then
+    if type(animal) == "table" and animal.ModelName then
       local info = G.Economy.Get(animal.ModelName)
-      if info and S.sellRar[info.Rarity] then
-        local r = invoke("Plot_SellAnimal", key)
-        if r.Ok then
-          soldCount += 1
-          soldThisPass += 1
-          soldLast = tostring(animal.ModelName)
+      if info then
+        local entry = { key = key, animal = animal, info = info, score = animalScore(info) }
+        if animal.Placed then
+          table.insert(placed, entry)
         else
-          soldLast = tostring(r.Reason)
+          table.insert(unplaced, entry)
         end
-        setSellStatus()
-        task.wait(0.3)
       end
     end
   end
+
+  local worstScore = math.huge
+  for _, e in ipairs(placed) do
+    if e.score < worstScore then worstScore = e.score end
+  end
+
+  local emptySlots = math.max(0, 10 - #placed)
+  local sellable = {}
+  for _, e in ipairs(unplaced) do
+    if S.sellRar[e.info.Rarity] then
+      table.insert(sellable, e)
+    end
+  end
+
+  table.sort(sellable, function(a, b) return a.score > b.score end)
+  for i, e in ipairs(sellable) do
+    if i <= emptySlots or e.score > worstScore then
+      e.keep = true
+    end
+  end
+
+  local soldThisPass = 0
+  for _, e in ipairs(sellable) do
+    if not S.sell then break end
+    if not e.keep then
+      local r = invoke("Plot_SellAnimal", e.key)
+      if r.Ok then
+        soldCount += 1
+        soldThisPass += 1
+        soldLast = tostring(e.animal.ModelName)
+      else
+        soldLast = tostring(r.Reason)
+      end
+      setSellStatus()
+      task.wait(0.05)
+    end
+  end
+
   if soldThisPass == 0 then
-    soldLast = "nothing to sell"
+    local kept = 0
+    for _, e in ipairs(sellable) do
+      if e.keep then kept += 1 end
+    end
+    soldLast = kept > 0 and ("kept " .. kept .. " (smart)") or "nothing to sell"
     setSellStatus()
   end
 end)
 
 local RewardGroup = RewardsTab:AddLeftGroupbox("Rewards", "gift")
+local DreamGroup = RewardsTab:AddRightGroupbox("Dream Event", "moon")
+
 local rewardStatus = RewardGroup:AddLabel("Ready")
 
 RewardGroup:AddToggle("ClaimOffline", {
@@ -1236,6 +1781,219 @@ RewardGroup:AddToggle("ClaimFreeShop", {
   Default = true,
   Callback = function(state) S.free = state end,
 })
+
+local DREAM_ZONE_KEYS = { "Taiga", "DeepWaters", "MythicalParadise", "PhantomHarbor", "EclipseKingdom" }
+
+local function buildDreamZoneOptions()
+  local lvl = tonumber(get("Level")) or 1
+  local power = G.Level.ThrowPowerForLevel(lvl)
+  local list = { "Best reachable" }
+  for _, key in ipairs(DREAM_ZONE_KEYS) do
+    local zone = G.Areas and G.Areas.ByKey and G.Areas.ByKey[key]
+    local name = (zone and zone.Name) or key
+    local startDist = zone and zone.StartDistance
+    if startDist then
+      if power >= startDist then
+        table.insert(list, name)
+      else
+        table.insert(list, ("🔒 %s (Lv %d)"):format(name, G.Level.LevelForDistance(startDist)))
+      end
+    else
+      table.insert(list, name)
+    end
+  end
+  return list
+end
+
+local function dreamZoneName()
+  if S.dreamZone == "Best reachable" then
+    local lvl = tonumber(get("Level")) or 1
+    local power = G.Level.ThrowPowerForLevel(lvl)
+    local best, bestStart = nil, -1
+    for _, key in ipairs(DREAM_ZONE_KEYS) do
+      local zone = G.Areas and G.Areas.ByKey and G.Areas.ByKey[key]
+      local startDist = zone and zone.StartDistance
+      if startDist and power >= startDist and startDist > bestStart then
+        bestStart = startDist
+        best = zone.Name or key
+      end
+    end
+    return best or "Max power"
+  end
+  return (S.dreamZone:gsub("^🔒 ", ""):gsub(" %(Lv %d+%)$", ""))
+end
+
+local function fmtSecs(secs)
+  secs = math.max(0, math.floor(secs))
+  if secs >= 60 then
+    return ("%dm %ds"):format(math.floor(secs / 60), secs % 60)
+  end
+  return secs .. "s"
+end
+
+local dreamStatusLabel = DreamGroup:AddLabel("Dream: OFF")
+local function setDreamStatus(text) setName(DreamGroup:GetControl(dreamStatusLabel), text) end
+
+DreamGroup:AddToggle("AutoDream", {
+  Text = "Auto Dream Event",
+  Default = false,
+  Tooltip = "Farms the Dreamland event while active. Turn off Auto Throw and Auto Farm first.",
+  Callback = function(state)
+    S.dream = state
+    if G.Meter then
+      G.Meter.TestAutoTap = (S.throw or S.farm or S.dream) and 0.5 or nil
+    end
+    if not state then setDreamStatus("Dream: OFF") end
+  end,
+})
+
+DreamGroup:AddDropdown("DreamZone", {
+  Text = "Dream zone",
+  Values = buildDreamZoneOptions(),
+  Default = "Best reachable",
+  Callback = function(value)
+    if type(value) == "string" and value:find("🔒", 1, true) then
+      task.defer(function()
+        pcall(function()
+          Library.Options.DreamZone:SetValue(S.dreamZone or "Best reachable")
+        end)
+      end)
+      return
+    end
+    S.dreamZone = value
+  end,
+})
+
+DreamGroup:AddToggle("AutoDreamIndex", {
+  Text = "Auto Dream Index",
+  Default = false,
+  Tooltip = "Farms missing pets during the Dream event.",
+  Callback = function(state)
+    S.autoDreamIndex = state
+    if state then
+      S.autoIndex = false
+      Library.Toggles.AutoIndex:SetValue(false)
+    end
+  end,
+})
+
+local startDreamIdxOpts = buildDreamIndexZoneOptions()
+S.dreamIndexTarget = startDreamIdxOpts[1]
+
+DreamGroup:AddDropdown("DreamIndexTarget", {
+  Text = "Dream Index Area",
+  Values = startDreamIdxOpts,
+  Default = startDreamIdxOpts[1],
+  Callback = function(v)
+    if type(v) == "string" and v:find("🔒", 1, true) then
+      task.defer(function()
+        pcall(function()
+          Library.Options.DreamIndexTarget:SetValue(S.dreamIndexTarget or startDreamIdxOpts[1])
+        end)
+      end)
+      return
+    end
+    S.dreamIndexTarget = v
+  end,
+})
+
+task.spawn(function()
+  local last = -1
+  while S.alive do
+    pcall(function()
+      local lvl = tonumber(get("Level")) or 1
+      if lvl ~= last then
+        last = lvl
+        local opts = buildDreamZoneOptions()
+        Library.Options.DreamZone:SetValues(opts)
+        if S.dreamZone and not table.find(opts, S.dreamZone) then
+          S.dreamZone = "Best reachable"
+          Library.Options.DreamZone:SetValue("Best reachable")
+        end
+      end
+    end)
+    task.wait(5)
+  end
+end)
+
+loop(dreamStatusLabel, 1, function()
+  if not S.dream then return end
+  if not G.Dreamland then setDreamStatus("Dream: module missing") return end
+  if S.throw or S.farm then
+    setDreamStatus("Dream: turn off Auto Throw/Farm")
+    return
+  end
+  if not G.Dreamland.IsEligible(LP) then
+    setDreamStatus("Dream: not eligible")
+    return
+  end
+  local state = G.Dreamland.State()
+  if not state or not state.Open then
+    setDreamStatus("Dream: closed")
+    return
+  end
+  if not state.Active then
+    if state.NextStart then
+      local wait = math.max(0, state.NextStart - workspace:GetServerTimeNow())
+      setDreamStatus("Dream: next in " .. fmtSecs(wait))
+    else
+      setDreamStatus("Dream: waiting")
+    end
+    return
+  end
+  if G.State and (G.State.Busy or G.State.DreamlandOpen) then
+    local left = math.max(0, (state.RunEnd or 0) - workspace:GetServerTimeNow())
+    setDreamStatus(("Dream: %s | %s left | busy"):format(dreamZoneName(), fmtSecs(left)))
+    return
+  end
+  local left = math.max(0, (state.RunEnd or 0) - workspace:GetServerTimeNow())
+  local minTime = (S.throwMode == "Fast") and 10 or 30
+  if left < minTime then
+    setDreamStatus(("Dream: %s left (too late)"):format(fmtSecs(left)))
+    return
+  end
+
+  local target = dreamZoneName()
+  local savedZone = S.zone
+  local savedDist = S.indexTargetDistance
+
+  if S.autoDreamIndex then
+    local dreamTarget, dreamDist, dreamRarity = getMissingDreamIndexZone()
+    if dreamTarget then
+      target = dreamTarget
+      S.indexTargetDistance = dreamDist
+      equipBestFoodForRarity(dreamRarity, S.dreamIndexTargetFood)
+      local meterBonus = 20
+      if G.GameConfig and G.GameConfig.Throw and G.GameConfig.Throw.MeterBonusStuds then
+        meterBonus = G.GameConfig.Throw.MeterBonusStuds
+      end
+      local actualPower = math.max(1, dreamDist - meterBonus)
+      setDreamStatus(("Dream Index: %s (%.1f) [%s] Perfect"):format(dreamTarget, actualPower, dreamRarity))
+    else
+      S.indexTargetDistance = nil
+      if S.dreamIndexTarget:find("Auto") then
+        setDreamStatus("Dream: Index Complete ✅")
+      else
+        setDreamStatus("Dream Index: Area Complete ✅")
+      end
+    end
+  else
+    S.indexTargetDistance = nil
+    setDreamStatus(("Dream: %s | %s left | throwing"):format(target, fmtSecs(left)))
+  end
+
+  S.zone = target
+  local curLvl = tonumber(get("Level")) or 1
+  invoke("Player_SetThrowPower", throwPowerForLevel(curLvl))
+  
+  local ok, err = pcall(doThrow)
+  
+  S.zone = savedZone
+  S.indexTargetDistance = savedDist
+  if not ok then
+    setDreamStatus("Dream: throw error - " .. tostring(err))
+  end
+end)
 
 loop(rewardStatus, 60, function()
   local log = {}
@@ -1284,6 +2042,7 @@ SettingsGroup:AddButton({
     S.alive = false
     S.farm = false
     S.throw = false
+    S.dream = false
     S.train = false
     S.sell = false
     S.equipBest = false
@@ -1291,6 +2050,11 @@ SettingsGroup:AddButton({
     S.fence = false
     S.buyFood = false
     S.equipFood = false
+    S.autoIndex = false
+    S.indexTargetFood = nil
+    S.indexTargetDistance = nil
+    S.autoDreamIndex = false
+    S.dreamIndexTargetFood = nil
     S.offline = false
     S.free = false
     S.tap = false
@@ -1328,6 +2092,32 @@ local idleConn = LP.Idled:Connect(function()
   end
 end)
 table.insert(connections, idleConn)
+
+task.spawn(function()
+  while S.alive do
+    task.wait(math.random(120, 180))
+    if S.antiAfk then
+      pcall(function()
+        if mousemoverel then
+          mousemoverel(math.random(-50, 50), math.random(-50, 50))
+        end
+        
+        if keypress and keyrelease then
+          keypress(0x20)
+          task.wait(0.05)
+          keyrelease(0x20)
+        end
+
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new(math.random(-2, 2), math.random(-2, 2)))
+        
+        if LP:GetAttribute("LastInput") then
+          LP:SetAttribute("LastInput", workspace:GetServerTimeNow())
+        end
+      end)
+    end
+  end
+end)
 
 local tapStatusLabel = TrainGroup:AddLabel("Tap: waiting")
 local tapOk, tapFail, tapLastReason = 0, 0, "-"
