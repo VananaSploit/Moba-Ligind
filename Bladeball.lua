@@ -420,6 +420,7 @@ local function GetPredictedBallPosition(ball)
         Get_Comp_Ping() / 1000 + math.min(os.clock() - entry.t, 0.1) * 0.5 + 0.02,
         0.04, 0.30
     )
+    pred_time = pred_time + ((Player.Character and Player.Character.PrimaryPart) and math.max(0, (1 - math.min((Player.Character.PrimaryPart.Position - (pos + entry.vel * pred_time)).Magnitude / 300, 1)) * 0.005) or 0)
     return pos + entry.vel * pred_time
 end
 
@@ -740,7 +741,7 @@ function Auto_Parry.Parry(Parry_Type, Silent)
     Env.Last_Auto_Fire = os.clock()
     if Parry_Input_Method == "Keypress" then
         local now = os.clock()
-        if (now - Keypress_Last_Fire) < KEYPRESS_INTERVAL then
+        if (now - Keypress_Last_Fire) < KEYPRESS_INTERVAL + (((Player:GetAttribute("ParryLogRate") or 0) > 0) and 0.03 or 0) then
             return false
         end
         Keypress_Last_Fire = now
@@ -1689,7 +1690,7 @@ local Parry_Distance_Buffer = 0
 local Speed_Divide_Base = 2
 local Min_Threshold = 8
 local Min_Parry_Distance = 12
-local Parry_Accuracy_Scale = 0.4
+local Parry_Accuracy_Scale = 0.35
 local Parry_Accuracy_Min_Distance = 4
 
 local function Calculate_Parry_Distance(Velocity, Offset, Ping, Multiplier, Buffer)
@@ -1702,9 +1703,11 @@ local function Calculate_Parry_Distance(Velocity, Offset, Ping, Multiplier, Buff
         Speed_Component = Min_Parry_Distance
     end
 
-    local Ping_Lead = Approach_Speed * Ping / 2000
+    local Ping_Lead = math.clamp(Ping / 10, 10, 16) + Approach_Speed * math.clamp(Ping - 120, 0, 380) / 1000
 
     local Result = (Min_Threshold + Speed_Component + Buffer) * Parry_Accuracy_Scale + Ping_Lead
+        + ((Player.Character and Player.Character:GetAttribute("IncreasedParryRangeEnabled")) and 6 or 0)
+        - (((Player:GetAttribute("ParryLogRate") or 0) > 0) and 1.5 or 0)
     if Result < Parry_Accuracy_Min_Distance then
         Result = Parry_Accuracy_Min_Distance
     end
@@ -2293,14 +2296,14 @@ local Auto_Parry_Toggle = Main_Group:AddToggle('Auto_Parry_Toggle', {
                 end
 
                 local Skip_Curve = Auto_Parry.Is_Fury_Target() or Preclick_Armed or (Distance <= Parry_Accuracy * 0.5)
-                if Distance <= Parry_Accuracy and (Skip_Curve or not Auto_Parry.Is_Curved(Offset, Velocity, Ball_Velocity)) then
+                if Distance <= Parry_Accuracy and (os.clock() - Last_Parry) > 0.2 and (Skip_Curve or not Auto_Parry.Is_Curved(Offset, Velocity, Ball_Velocity)) then
                     Auto_Parry.Parry(Selected_Parry_Type)
                     Last_Parry = os.clock()
                     Note_Parry(Last_Parry)
                     Parried = true
                     task.spawn(function()
                         local T = os.clock()
-                        repeat RunService.PreRender:Wait() until (os.clock() - T) >= 0.5 or not Parried
+                        repeat RunService.PreRender:Wait() until (os.clock() - T) >= 0.6 or not Parried
                         Parried = false
                     end)
                 end
