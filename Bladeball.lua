@@ -319,8 +319,15 @@ local Upvalues = ((debug and debug.getupvalues) or getupvalues)(require(
 ))
 local Key, Hash, JobId = Upvalues[3][3], Upvalues[8], game.JobId
 
-if Hash:find("PARRY_HASH_FAKE", 1, true) then
+if not Hash or Hash:find("PARRY_HASH_FAKE", 1, true) then
     Hash = nil
+    for k, v in pairs(Upvalues) do
+        if k ~= 3 and k ~= 7 and type(v) == 'string' and #v >= 16
+            and v ~= Key and not v:find("PARRY_HASH_FAKE", 1, true) then
+            Hash = v
+            break
+        end
+    end
 end
 
 local Encoded = table.create(#Upvalues[7])
@@ -351,7 +358,16 @@ local function Parry_Token()
         Upvalues = NewUp
         Key  = Upvalues[3] and Upvalues[3][3]
         Hash = Upvalues[8]
-        if Hash and Hash:find("PARRY_HASH_FAKE", 1, true) then Hash = nil end
+        if not Hash or Hash:find("PARRY_HASH_FAKE", 1, true) then
+            Hash = nil
+            for k, v in pairs(Upvalues) do
+                if k ~= 3 and k ~= 7 and type(v) == 'string' and #v >= 16
+                    and v ~= Key and not v:find("PARRY_HASH_FAKE", 1, true) then
+                    Hash = v
+                    break
+                end
+            end
+        end
         local ok2, Pad2 = pcall(Upvalues[4], Key, 'TIME')
         if not ok2 or type(Pad2) ~= 'string' or #Pad2 == 0 then return nil end
         Pad = Pad2
@@ -791,7 +807,9 @@ function Auto_Parry.Parry(Parry_Type, Silent)
     if Multi_In_Range == -1 then
         return false
     elseif not Multi_Fired and (Multi_In_Range == 0 or In_Training) then
-        Remote:FireServer(Hash, Key, Parry_Token(), Parry_Data[1], Parry_Data[2], Parry_Data[3], Parry_Data[4], false)
+        if Hash then
+            Remote:FireServer(Hash, Key, Parry_Token(), Parry_Data[1], Parry_Data[2], Parry_Data[3], Parry_Data[4], false)
+        end
     end
 
     if not Silent and not Connections_Manager['Manual Spam'] then
@@ -1748,7 +1766,7 @@ function Auto_Parry.Fire_Multi_Balls(Targeting_Balls, Parry_Data)
                         local Last_Fire = Auto_Parry.Multi_Ball_Per_Ball_CD[Ball]
                         if not Last_Fire or Now - Last_Fire >= Auto_Parry.MULTI_BALL_PER_BALL_CD then
                             local ok, Token = pcall(Parry_Token)
-                            if ok and type(Token) == 'string' and #Token > 0 then
+                            if ok and type(Token) == 'string' and #Token > 0 and Hash then
                                 local Aim = CFrame.new(MyPos, Ball_Pos)
                                 local Screen = Cam:WorldToScreenPoint(Ball_Pos)
                                 Remote:FireServer(Hash, Key, Token, 0, Aim, Events_Tbl,
@@ -2841,7 +2859,9 @@ do
         LastGlobalFire = now
 
         local PD = Auto_Parry.Parry_Data(Selected_Parry_Type)
-        Remote:FireServer(Hash, Key, Parry_Token(), PD[1], PD[2], PD[3], PD[4], false)
+        if Hash then
+            Remote:FireServer(Hash, Key, Parry_Token(), PD[1], PD[2], PD[3], PD[4], false)
+        end
 
         if now - LastTBAnimation >= 0.05 then
             LastTBAnimation = now
