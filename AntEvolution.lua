@@ -492,7 +492,7 @@ AutoGroup:AddToggle("AutoRebirth", {
 })
 
 AutoGroup:AddToggle("AttackAura", {
-    Text = "Attack Aura",
+    Text = "Auto Attack",
     Default = false,
     Callback = function(enabled)
         _G.Attack = enabled
